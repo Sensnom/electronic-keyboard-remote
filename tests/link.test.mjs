@@ -19,7 +19,7 @@ test('configuration rejects TCP, insecure WS, URL credentials and wildcard topic
  for(const change of [{url:'mqtt://host:1883'},{url:'ws://host/mqtt'},{url:'wss://user:password@host/mqtt'},{upTopic:'#'},{downTopic:'piano/up'},{qos:2}])
   await assert.rejects(connectInstrument({...config,...change},()=>{throw Error('connector must not be reached');}),/配置|WSS|QoS/);
 });
-test('browser binary link: sequence recovery, exact retry, split ACK, five presets and atomic upload',async()=>{
+test('browser binary link: sequence recovery, exact retry, split ACK, four presets and atomic upload',async()=>{
  const client=new Client();let firstStatus=true,dropped=false,stored=false,noteCount=42,count=0;
  client.respond=(p)=>{
   if(firstStatus){firstStatus=false;client.ack(p,{code:5,actual:250});return;}
@@ -34,11 +34,11 @@ test('browser binary link: sequence recovery, exact retry, split ACK, five prese
  assert.equal(client.subscription.options.qos,0);
  assert.equal((await link.status()).modules,1);assert.equal(client.frames[1].payload[3],250);
  const start=client.frames.length;
- const values=await Promise.all([link.parameter(1,40000),link.parameter(2,3),link.parameter(2,4)]);
- assert.deepEqual(values.map(x=>x.actual),[40000,3,4]);
+ const values=await Promise.all([link.parameter(1,40000),link.parameter(2,2),link.parameter(2,4)]);
+ assert.deepEqual(values.map(x=>x.actual),[40000,2,4]);
  assert.deepEqual(client.frames[start].payload,client.frames[start+1].payload,'retry must be byte-identical');
  assert.ok(client.frames.every(x=>x.options.qos===0&&x.options.retain===false));
- assert.throws(()=>link.parameter(2,5),/范围/);
+ assert.throws(()=>link.parameter(2,5),/范围/);assert.throws(()=>link.parameter(2,3),/范围/);
  const song={modules:1,endMs:100,notes:[{start:0,duration:100,note:84,velocity:90,shift:2}]};
  const first=client.frames.length;const ack=await link.upload(song);assert.equal(ack.stored,true);assert.equal(ack.noteCount,1);
  assert.deepEqual(client.frames.slice(first).map(x=>x.payload[2]),[5,1,2,3]);
