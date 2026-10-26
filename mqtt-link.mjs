@@ -68,7 +68,7 @@ class InstrumentLink{
  });}
  parameter(id,value){
   if(!Number.isInteger(id)||!Number.isInteger(value)||id<1||id>9||
-   (id<=4&&(value<0||value>65535))||(id===2&&value>4)||(id===3&&value>3)||
+   (id<=4&&(value<0||value>65535))||(id===2&&(value>4||value===3))||(id===3&&value>3)||
    ((id===5||id===9)&&(value<0||value>1))||(id===6&&(value<0||value>7))||
    (id===7&&(value< -12||value>12))||(id===8&&(value< -2||value>2)))throw Error('参数范围无效');
   if(!(this.parameterMask&(1<<(id-1))))throw Error('当前乐器不支持此设置');
