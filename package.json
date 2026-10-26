@@ -1,0 +1,12 @@
+{
+  "name": "electronic-keyboard-remote",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "vendor": "node scripts/vendor.mjs"
+  },
+  "dependencies": {
+    "mqtt": "5.16.1"
+  }
+}
