@@ -1,32 +1,57 @@
 import {parseMidi} from './midi.mjs';
 import {crc16} from './protocol.mjs';
 
-export function compileTimeline(raw, {tracks, modules=2, speed=100}={}) {
-  if (![1,2].includes(modules)) throw new Error('键盘数量须为1或2');
-  if (!Number.isInteger(speed) || speed<50 || speed>150) throw new Error('速度须为50～150%');
+function compileSelection(raw, {tracks, speed=100, maxNotes=32768,truncate=false}={}) {
+  if(!Number.isInteger(maxNotes)||maxNotes<1||maxNotes>32768)throw Error('设备曲目容量无效');
+  if (!Number.isInteger(speed) || speed<10 || speed>300) throw new Error('速度须为10～300%的整数');
   const midi=parseMidi(raw);
   if (!Array.isArray(tracks) || !tracks.length) throw new Error('请显式选择旋律轨道');
   const selected=[...new Set(tracks)].flatMap(i=>{
     if (!Number.isInteger(i)||!midi.tracks[i]) throw new Error('轨道编号无效');
     return midi.tracks[i].notes;
   });
-  if (!selected.length || selected.length>256) throw new Error('练习须包含1～256个音符，不能截断上传');
+  if (!selected.length || (!truncate&&selected.length>maxNotes)) throw new Error(`练习须包含1～${maxNotes}个音符`);
   const tempos=[...midi.tempos].sort((a,b)=>a.tick-b.tick);
   for (let i=1;i<tempos.length;i++) if(tempos[i].tick===tempos[i-1].tick&&tempos[i].us!==tempos[i-1].us)
     throw new Error('同一时刻存在冲突速度事件');
+  const segments=[{tick:0,us:500000,elapsed:0}];
+  for(const t of tempos){
+    const previous=segments.at(-1);
+    if(t.tick===previous.tick)previous.us=t.us;
+    else segments.push({...t,elapsed:previous.elapsed+(t.tick-previous.tick)*previous.us/midi.division});
+  }
   const milliseconds=tick=>{
-    let last=0,us=500000,sum=0;
-    for(const t of tempos){if(t.tick>tick)break;sum+=(t.tick-last)*us/midi.division;last=t.tick;us=t.us;}
-    return Math.round((sum+(tick-last)*us/midi.division)/1000*100/speed);
+    let lo=0,hi=segments.length;
+    while(lo+1<hi){const mid=(lo+hi)>>>1;if(segments[mid].tick<=tick)lo=mid;else hi=mid;}
+    const t=segments[lo];
+    return Math.round((t.elapsed+(tick-t.tick)*t.us/midi.division)/1000*100/speed);
   };
-  const notes=selected.map(n=>{
-    if(n.overlap)throw new Error('同轨道同音重叠重触，无法确定独立松开时刻');
-    if(n.endTick===null)throw new Error('存在缺少松开 Note Off 的音符');
-    const start=milliseconds(n.tick),duration=milliseconds(n.endTick)-start;
+  let notes=selected.map(n=>{
+    const start=milliseconds(n.tick),duration=n.endTick===null?null:milliseconds(n.endTick)-start;
+    return {start,duration,note:n.note,velocity:n.velocity,shift:0,source:n};
+  }).sort((a,b)=>a.start-b.start||a.note-b.note);
+  if(notes.length>maxNotes){
+    let keep=maxNotes;
+    while(keep>0&&notes[keep-1].start===notes[keep].start)keep--;
+    if(keep===0)throw Error('设备容量不足以保留开头的完整和弦，请选择更少轨道');
+    notes=notes.slice(0,keep);
+  }
+  for(const n of notes){
+    if(n.source.overlap)throw new Error('同轨道同音重叠重触，无法确定独立松开时刻');
+    if(n.duration===null)throw new Error('存在缺少松开 Note Off 的音符');
+    const {start,duration}=n;
     if(duration<1||duration>65535||start<0||start+duration>0xffffff-2000)
       throw new Error('音符时长或曲目时间超出范围');
-    return {start,duration,note:n.note,velocity:n.velocity,shift:0};
-  }).sort((a,b)=>a.start-b.start||a.note-b.note);
+    delete n.source;
+  }
+  return {notes,truncation:{truncated:notes.length<selected.length,originalNoteCount:selected.length,retainedNoteCount:notes.length,maxNotes}};
+}
+
+export function compileMidiNotes(raw,options){return compileSelection(raw,options).notes;}
+
+export function compileTimeline(raw, {tracks, modules=2, speed=100, maxNotes=256,truncate=false}={}) {
+  if (![1,2].includes(modules)) throw new Error('键盘数量须为1或2');
+  const {notes,truncation}=compileSelection(raw,{tracks,speed,maxNotes,truncate});
   let previous=0,held=[];
   for(let i=0;i<notes.length;){
     let j=i+1;while(j<notes.length&&notes[j].start===notes[i].start)j++;
@@ -42,7 +67,7 @@ export function compileTimeline(raw, {tracks, modules=2, speed=100}={}) {
     held.push(...group);
     i=j;
   }
-  return {version:1,modules,endMs:Math.max(...notes.map(n=>n.start+n.duration)),notes};
+  return {version:1,modules,endMs:notes.reduce((end,n)=>Math.max(end,n.start+n.duration),0),notes,...(truncate?{truncation}:{})};
 }
 
 export function encodeRecords(notes) {
@@ -64,17 +89,18 @@ export function frame(type,seq,payload=new Uint8Array()){
   const b=new Uint8Array(payload.length+8);b.set([165,90,type,seq&255,payload.length&255,payload.length>>8]);
   b.set(payload,6);const crc=crc16(b.subarray(2,-2));b[b.length-2]=crc&255;b[b.length-1]=crc>>8;return b;
 }
-export function uploadFrames(song,firstSeq=0){
-  validateTimeline(song);
+export function uploadFrames(song,firstSeq=0,{maxNotes=256}={}){
+  validateTimeline(song,{maxNotes});
   const bytes=encodeRecords(song.notes),crc=crc16(bytes),n=song.notes.length,end=song.endMs;
   const packets=[frame(1,firstSeq++,new Uint8Array([song.modules,n&255,n>>8,end&255,(end>>8)&255,end>>16,crc&255,crc>>8]))];
   for(let i=0;i<n;i+=7){const part=bytes.subarray(i*8,Math.min(n,i+7)*8),p=new Uint8Array(part.length+2);
     p.set([i&255,i>>8]);p.set(part,2);packets.push(frame(2,firstSeq++,p));}
   packets.push(frame(3,firstSeq++));return packets;
 }
-export function validateTimeline(song){
-  if(!song||![1,2].includes(song.modules)||!Array.isArray(song.notes)||song.notes.length<1||song.notes.length>256)
-    throw Error('曲目需为1～256个音符及实际键盘数量');
+export function validateTimeline(song,{maxNotes=256}={}){
+  if(!Number.isInteger(maxNotes)||maxNotes<1||maxNotes>32768)throw Error('设备曲目容量无效');
+  if(!song||![1,2].includes(song.modules)||!Array.isArray(song.notes)||song.notes.length<1||song.notes.length>maxNotes)
+    throw Error(`曲目需为1～${maxNotes}个音符及实际键盘数量`);
   let last=-1,shift=0,mask=0,maxEnd=0,held=[];
   for(const n of song.notes){
     if(!['start','duration','note','velocity','shift'].every(k=>Number.isSafeInteger(n[k]))||

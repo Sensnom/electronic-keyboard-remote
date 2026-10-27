@@ -15,6 +15,39 @@ class Client extends EventEmitter {
  }
 }
 const config={url:'wss://broker.example/mqtt',upTopic:'piano/up',downTopic:'piano/down',qos:0,ackTimeoutMs:20};
+test('manual sustain uses a new capability and rejects the retired score parameter',async()=>{
+ const client=new Client();let value=0;
+ client.respond=p=>{if(p[2]===4)value=p[7]|p[8]<<8;client.ack(p,{actual:p[2]===5?0x89ff:value});};
+ const link=await connectInstrument(config,async()=>client);
+ assert.equal((await link.status()).parameterMask,0x9ff);
+ assert.equal((await link.parameter(12,1)).actual,1);
+ assert.equal((await link.readParameters())[12],1);
+ assert.equal((await link.parameter(12,0)).actual,0);
+ assert.throws(()=>link.parameter(12,2),/范围/);
+ assert.throws(()=>link.parameter(10,1),/范围/);await link.close();
+ const old=new Client();old.respond=p=>old.ack(p,{actual:0x83ff});
+ const legacy=await connectInstrument(config,async()=>old);const status=await legacy.status();
+ assert.equal(status.parameterMask&512,0);
+ assert.throws(()=>legacy.parameter(12,1),/不支持/);await legacy.close();
+});
+test('phone Loop actions and temporary signed bend are capability gated',async()=>{
+ const client=new Client();let bend=0;
+ client.respond=p=>{
+  if(p[2]===4)bend=p[7]|p[8]<<8;
+  client.ack(p,{actual:p[2]===5?0xc7ff:(p[2]===8||p[2]===9)?0x2b:bend});
+ };
+ const link=await connectInstrument(config,async()=>client);
+ assert.equal((await link.status()).loopControl,true);
+ assert.equal((await link.parameter(11,-512)).actual,-512);
+ assert.throws(()=>link.parameter(11,-513),/范围/);
+ const state=await link.loop('play');assert.equal(state.layers,3);assert.equal(state.playing,true);assert.equal(state.armed,true);
+ assert.equal(client.frames.at(-1).payload[6],3);
+ assert.equal((await link.loopStatus()).layers,3);
+ assert.throws(()=>link.loop('invalid'),/操作/);await link.close();
+ const old=new Client();old.respond=p=>old.ack(p,{actual:0x81ff});
+ const legacy=await connectInstrument(config,async()=>old);await legacy.status();
+ assert.throws(()=>legacy.loop('play'),/不支持/);assert.throws(()=>legacy.parameter(11,0),/不支持/);await legacy.close();
+});
 test('configuration rejects TCP, insecure WS, URL credentials and wildcard topics before connecting',async()=>{
  for(const change of [{url:'mqtt://host:1883'},{url:'ws://host/mqtt'},{url:'wss://user:password@host/mqtt'},{upTopic:'#'},{downTopic:'piano/up'},{qos:2}])
   await assert.rejects(connectInstrument({...config,...change},()=>{throw Error('connector must not be reached');}),/配置|WSS|QoS/);
