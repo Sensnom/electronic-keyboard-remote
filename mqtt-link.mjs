@@ -51,11 +51,11 @@ class InstrumentLink{
   if(this.queued>=8)return Promise.reject(Error('已有过多设备操作，请等待完成'));
   this.queued++;const result=this.tail.then(work);this.tail=result.catch(()=>{}).finally(()=>this.queued--);return result;
  }
- async send(type,payload=new Uint8Array()){
-  for(let attempt=0;attempt<3;attempt++){
+ async send(type,payload=new Uint8Array(),{timeoutMs=this.ackTimeoutMs,attempts=3}={}){
+  for(let attempt=0;attempt<attempts;attempt++){
    if(!this.connected)throw Error('MQTT连接已断开，请重新连接');
    const seq=this.sequence,bytes=frame(type,seq,payload);let timer;
-   const answer=new Promise((resolve,reject)=>{this.pending={seq,type,resolve,reject};timer=setTimeout(()=>reject(Error('乐器应答超时，请检查DTU联网、主题和串口')),this.ackTimeoutMs);});
+   const answer=new Promise((resolve,reject)=>{this.pending={seq,type,resolve,reject};timer=setTimeout(()=>reject(Error('乐器应答超时，请检查DTU联网、主题和串口')),timeoutMs);});
    answer.catch(()=>{});
    try{
     this.observe({kind:'tx',sequence:seq,requestType:type,data:bytes});
@@ -70,18 +70,18 @@ class InstrumentLink{
     this.sequence=(seq+1)&255;
     if(ack.code!==0)throw Object.assign(Error(['','CRC错误','数据格式错误','学习中不能覆盖曲目','参数或音域超出范围','序号错误','没有有效上传事务'][ack.code]||'乐器拒绝命令'),{deviceRejected:true});
     return ack;
-   }catch(error){this.observe({kind:'error',sequence:seq,requestType:type,message:error.message});if(error.deviceRejected||attempt===2)throw error;}
+   }catch(error){this.observe({kind:'error',sequence:seq,requestType:type,message:error.message});if(error.deviceRejected||attempt===attempts-1)throw error;}
    finally{clearTimeout(timer);this.pending=null;}
   }
   throw Error('设备序号未能同步，请重新连接');
  }
- status(){return this.enqueue(async()=>{
-  const ack=await this.send(5);this.parameterMask=ack.actual===0?15:(ack.actual&4095)&~512;this.readback=!!(ack.actual&32768);
+ status(options={}){return this.enqueue(async()=>{
+  const ack=await this.send(5,undefined,options);this.parameterMask=ack.actual===0?15:(ack.actual&4095)&~512;this.readback=!!(ack.actual&32768);
   this.loopControl=!!(ack.actual&16384);
   this.latencySupported=!!(ack.actual&4096);
   this.maxNotes=256;
   if(ack.actual&8192){
-   const capacity=await this.send(10);
+   const capacity=await this.send(10,undefined,options);
    if(capacity.actual<1||capacity.actual>32768)throw Error('乐器返回的曲目容量无效');
    this.maxNotes=capacity.actual;
   }
@@ -151,5 +151,5 @@ class InstrumentLink{
    this.progress={sent:packets.length,total:packets.length};return ack;
   });
  }
- async close(){this.connected=false;this.pending?.reject(Error('MQTT连接已断开'));await this.client.endAsync();}
+ async close(){this.connected=false;this.pending?.reject(Error('MQTT连接已断开'));await this.client.endAsync(true);}
 }

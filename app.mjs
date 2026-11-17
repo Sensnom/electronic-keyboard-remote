@@ -5,6 +5,7 @@ import {compileTimeline} from './assets/timeline.mjs';
 import {mountSignalLog} from './log-page.mjs';
 const $=id=>document.getElementById(id);
 let raw=null,device=null,link=null,busy=false,fileGeneration=0,connectionGeneration=0;
+let connectionWanted=false,connectionOptions=null,checkingConnection=false;
 let measurementRunning=false,measurementOwner=null;
 const signalLog=mountSignalLog({onMeasure:measureLatency});
 const parameters=[['volume',1,'percent'],['patch',2],['effect',3],['wet',4,'percent'],['chord-enabled',5],['chord-type',6],['transpose',7,'signed'],['octave',8,'signed'],['glide',9],['sustain',12]];
@@ -16,8 +17,8 @@ function compile(){
 }
 function update(){
  const ready=!!device&&!!link?.connected;
- for(const id of configIds)$(id).disabled=busy;
- $('connect').disabled=busy;$('disconnect').disabled=(busy&&!measurementRunning)||!link;
+ for(const id of configIds)$(id).disabled=busy||connectionWanted;
+ $('connect').disabled=busy||connectionWanted;$('disconnect').disabled=(busy&&!measurementRunning)||!connectionWanted;
  signalLog.update({ready,supported:!!device?.latencySupported,busy});
  for(const id of ['file','speed','speed-number'])$(id).disabled=busy;
  for(const input of document.querySelectorAll('#tracks input'))input.disabled=busy;
@@ -42,24 +43,38 @@ function displayDevice(value){
  device=value;$('connection').textContent=`已连接 · ${value.modules}块板 / ${value.modules*12}键 · ${value.learning?'学习中':value.stored?'已存上传曲目':'内置曲目'}`;
 }
 async function refresh(){if(link?.connected)displayDevice(await link.status());}
-$('connect').onclick=async()=>{
- const generation=++connectionGeneration;busy=true;device=null;update();$('connection').textContent='正在连接乐器…';
+async function checkConnection(){
+ if(!connectionWanted||checkingConnection||busy||link?.queued)return;
+ const generation=connectionGeneration,wasReady=!!device;checkingConnection=true;
  try{
-  if(link)await link.close();link=null;
-  link=await connectInstrument({url:$('broker').value.trim(),upTopic:$('up-topic').value.trim(),downTopic:$('down-topic').value.trim(),
-   username:$('username').value,password:$('password').value,qos:Number($('qos').value),
-   onLog:event=>{if(generation===connectionGeneration)signalLog.receive(event);},
-   onDisconnect:()=>{if(generation===connectionGeneration){device=null;$('connection').textContent='连接已断开，请重新连接乐器。';update();}}},(url,options)=>mqtt.connectAsync(url,options));
-  // Move past a possible cached STATUS from a previous phone session.
-  await link.status();displayDevice(await link.status());
-  $('connection-settings').open=false;
+  if(!link?.connected){
+   const old=link;link=null;await old?.close();
+   let candidate=null;
+   candidate=await connectInstrument({...connectionOptions,
+    onLog:event=>{if(generation===connectionGeneration)signalLog.receive(event);},
+    onDisconnect:()=>{if(generation===connectionGeneration&&connectionWanted&&link===candidate){device=null;$('connection').textContent='网络连接已断开，正在自动重连…';update();}}
+   },(url,options)=>mqtt.connectAsync(url,options));
+   if(generation!==connectionGeneration||!connectionWanted){await candidate.close();return;}
+   link=candidate;
+  }
+  // Two checks move past a cached STATUS and resynchronise after device reset.
+  const current=link,probe={timeoutMs:2000,attempts:2};
+  await current.status(probe);const value=await current.status(probe);
+  if(generation!==connectionGeneration||!connectionWanted)return;
+  displayDevice(value);
+  if(!wasReady)$('connection-settings').open=false;
  }catch(error){
-  device=null;$('connection').textContent=error.message+'；尚未连接乐器。';
-  if(link){++connectionGeneration;await link.close();link=null;}
- }finally{busy=false;update();}
+  if(generation===connectionGeneration&&connectionWanted){device=null;$('connection').textContent=error.message+'；正在自动重试，可点击断开停止。';}
+ }finally{checkingConnection=false;update();}
+}
+$('connect').onclick=()=>{
+ ++connectionGeneration;connectionWanted=true;device=null;
+ connectionOptions={url:$('broker').value.trim(),upTopic:$('up-topic').value.trim(),downTopic:$('down-topic').value.trim(),
+  username:$('username').value,password:$('password').value,qos:Number($('qos').value)};
+ $('connection').textContent='正在连接乐器…';update();return checkConnection();
 };
 $('disconnect').onclick=async()=>{
- ++connectionGeneration;const old=link;link=null;device=null;busy=true;update();
+ connectionWanted=false;connectionOptions=null;++connectionGeneration;const old=link;link=null;device=null;busy=true;update();
  try{await old?.close();}finally{busy=false;$('connection').textContent='已断开连接。';update();}
 };
 $('file').onchange=async()=>{
@@ -209,6 +224,9 @@ bendRange.onchange=bendRange.onpointerup=bendRange.onpointercancel=bendRange.onb
 bendRange.onkeyup=event=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','PageUp','PageDown'].includes(event.key))holdBend(0);};
 window.addEventListener('blur',()=>holdBend(0));
 document.addEventListener('visibilitychange',()=>{if(document.hidden)holdBend(0);});
+setInterval(()=>{if(!document.hidden)checkConnection();},5000);
+window.addEventListener('online',checkConnection);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkConnection();});
 setInterval(async()=>{
  if(document.hidden||busy||!device?.loopControl||!link?.connected||link.queued)return;
  try{showLoop(await link.loopStatus());update();}catch{}

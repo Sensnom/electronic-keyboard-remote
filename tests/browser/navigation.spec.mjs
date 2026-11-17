@@ -4,22 +4,27 @@ import {test,expect} from '@playwright/test';
 // in the browser; no request reaches a public broker or a physical instrument.
 const broker=`
 import {frame} from '/assets/timeline.mjs';
-window.instrument={connections:0,closes:0,requests:[],holdUpload:false,release:null,stallRead:false};
+window.instrument={connections:0,closes:0,requests:[],holdUpload:false,release:null,stallRead:false,online:true,dropConnection:null,expectedSequence:null,holdConnect:false,releaseConnect:null};
 export default {async connectAsync(){
  const state=window.instrument;state.connections++;
+ if(state.holdConnect)await new Promise(resolve=>state.releaseConnect=resolve);
  const listeners={};let noteCount=42,stored=false;
+ state.dropConnection=()=>{for(const handler of listeners.close||[])handler();};
  const client={
   on(name,handler){(listeners[name]??=[]).push(handler);},
   async subscribeAsync(){},
   async endAsync(){state.closes++;for(const handler of listeners.close||[])handler();},
   async publishAsync(topic,bytes){
    state.requests.push([...bytes]);
+   if(!state.online)return;
    if(bytes[2]===7&&state.stallRead)await new Promise(()=>{});
    if(bytes[2]===1&&state.holdUpload)await new Promise(resolve=>state.release=resolve);
    if(bytes[2]===1)noteCount=bytes[7]+256*bytes[8];
    if(bytes[2]===3)stored=true;
-   const actual=bytes[2]===5?0x8dff:bytes[2]===4?bytes[7]+256*bytes[8]:0;
-   const ack=frame(128,bytes[3],Uint8Array.of(bytes[2],0,1,stored?1:0,noteCount&255,noteCount>>8,actual&255,actual>>8));
+   const mismatch=state.expectedSequence!==null&&bytes[3]!==state.expectedSequence;
+   const actual=mismatch?state.expectedSequence:bytes[2]===5?0x8dff:bytes[2]===4?bytes[7]+256*bytes[8]:0;
+   if(!mismatch)state.expectedSequence=(bytes[3]+1)&255;
+   const ack=frame(128,bytes[3],Uint8Array.of(bytes[2],mismatch?5:0,1,stored?1:0,noteCount&255,noteCount>>8,actual&255,actual>>8));
    for(const handler of listeners.message||[])handler('tof/flowmeter/data',ack,{retain:false});
   }
  };
@@ -58,7 +63,7 @@ test('repeated page switching retains one connection and sends no idle bend writ
   for(const [tab,title]of [['parameters','演奏参数'],['logs','信号日志'],['upload','曲目上传']]){
    await page.locator('#nav-'+tab).click();
    await expect(page.locator('#page-title')).toHaveText(title);
-   await expect(page.locator('#connect')).toBeEnabled();
+   await expect(page.locator('#file')).toBeEnabled();
   }
  }
  const state=await page.evaluate(()=>({connections:instrument.connections,closes:instrument.closes,
@@ -137,4 +142,56 @@ test('manual readback works and a stalled read releases controls after timeout',
  await page.locator('#patch').selectOption('1');
  await expect(page.locator('#parameter-result')).toHaveText('乐器已确认设置。');
  expect(await page.evaluate(()=>[instrument.connections,instrument.closes])).toEqual([1,0]);
+});
+test('device power cycling recovers automatically after the first manual connection',async({page})=>{
+ await page.clock.install();
+ await page.goto('/index.html');
+ await page.clock.runFor(15000);
+ expect(await page.evaluate(()=>instrument.connections)).toBe(0);
+ await page.locator('#connect').click();
+ await expect(page.locator('#connection')).toContainText('已连接');
+ await page.evaluate(()=>instrument.online=false);
+ await page.clock.runFor(10000);
+ await expect(page.locator('#connection')).toContainText('自动');
+ await page.evaluate(()=>{instrument.online=true;instrument.expectedSequence=0;});
+ await page.clock.runFor(10000);
+ await expect(page.locator('#connection')).toContainText('已连接');
+ await page.locator('#nav-parameters').click();
+ await page.locator('#patch').selectOption('1');
+ await expect(page.locator('#parameter-result')).toHaveText('乐器已确认设置。');
+ expect(await page.evaluate(()=>instrument.connections)).toBe(1);
+});
+test('network disconnect reconnects automatically; manual disconnect stops retries',async({page})=>{
+ await page.clock.install();
+ await connect(page);
+ await page.evaluate(()=>instrument.dropConnection());
+ await page.clock.runFor(10000);
+ await expect(page.locator('#connection')).toContainText('已连接');
+ expect(await page.evaluate(()=>instrument.connections)).toBe(2);
+ await page.locator('#connection-settings > summary').click();
+ await page.locator('#disconnect').click();
+ await page.clock.runFor(20000);
+ expect(await page.evaluate(()=>instrument.connections)).toBe(2);
+ await expect(page.locator('#connection')).toHaveText('已断开连接。');
+});
+test('manual disconnect cancels a connection that completes late',async({page})=>{
+ await page.clock.install();
+ await page.goto('/index.html');
+ await page.evaluate(()=>instrument.holdConnect=true);
+ await page.locator('#connect').click();
+ await expect.poll(()=>page.evaluate(()=>!!instrument.releaseConnect)).toBe(true);
+ await page.locator('#disconnect').click();
+ await page.evaluate(()=>instrument.releaseConnect());
+ await expect.poll(()=>page.evaluate(()=>instrument.closes)).toBe(1);
+ await page.clock.runFor(20000);
+ expect(await page.evaluate(()=>instrument.connections)).toBe(1);
+ await expect(page.locator('#connection')).toHaveText('已断开连接。');
+});
+test('idle health checks leave the connection settings open',async({page})=>{
+ await page.clock.install();
+ await connect(page);
+ await page.locator('#connection-settings > summary').click();
+ await page.clock.runFor(15000);
+ await expect(page.locator('#connection-settings')).toHaveAttribute('open','');
+ expect(await page.evaluate(()=>instrument.connections)).toBe(1);
 });
