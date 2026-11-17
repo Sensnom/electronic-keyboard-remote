@@ -53,7 +53,6 @@ $('connect').onclick=async()=>{
   // Move past a possible cached STATUS from a previous phone session.
   await link.status();displayDevice(await link.status());
   $('connection-settings').open=false;
-  if(location.pathname.endsWith('/parameters.html')&&device.readback)applySettings(await link.readParameters());
  }catch(error){
   device=null;$('connection').textContent=error.message+'；尚未连接乐器。';
   if(link){++connectionGeneration;await link.close();link=null;}
@@ -110,7 +109,7 @@ function applyValue(id,number,kind,value){
 }
 function applySettings(values){for(const [id,number,kind]of parameters)if(values[number]!==undefined)applyValue(id,number,kind,values[number]);}
 async function readSettings(){
- if(busy||!link||!device?.readback)return;busy=true;update();
+ if(busy||!link||!device?.readback)return;busy=true;update();$('parameter-result').textContent='正在读取乐器设置…';
  try{applySettings(await link.readParameters());if(device.loopControl)showLoop(await link.loopStatus());$('parameter-result').textContent='已读取乐器当前设置。';}
  catch(error){$('parameter-result').textContent=error.message;}finally{busy=false;update();}
 }
@@ -137,11 +136,16 @@ function showPage(){
  $('page-description').textContent=isLogs?'查看设备应答，保存数字路径计时记录。':isParameters?'调整声音与演奏方式。':'选择曲目，跟随琴上的提示练习。';
  document.title=$('page-title').textContent;
 }
-for(const id of ['nav-upload','nav-parameters','nav-logs'])$(id).onclick=event=>{
- event.preventDefault();holdBend(0);history.pushState(null,'',$(id).href);showPage();
- if(id==='nav-parameters')readSettings();
-};
-window.addEventListener('popstate',showPage);showPage();update();
+for(const id of ['nav-upload','nav-parameters','nav-logs']){
+ const button=$(id);
+ button.onclick=()=>{
+  const target=new URL(button.dataset.page,location.href);
+  if(target.pathname===location.pathname)return;
+  holdBend(0);history.pushState(null,'',target);showPage();
+ };
+ button.disabled=false;
+}
+window.addEventListener('popstate',()=>{holdBend(0);showPage();});showPage();update();
 
 async function measureLatency(){
  if(busy||!link?.connected||!device?.latencySupported)return;
@@ -178,6 +182,7 @@ for(const button of document.querySelectorAll('[data-loop]'))button.onclick=asyn
 };
 let bendDirection=0,bendTask=null;
 function holdBend(value){
+ if(value===0&&bendDirection===0)return;
  bendDirection=value;$('bend-range').value=String(value);$('bend-value').textContent=`${(value/256).toFixed(2)} 半音`;if(bendTask||!link?.connected||!device||(device.parameterMask&1024)===0)return;
  const current=link;
  bendTask=(async()=>{

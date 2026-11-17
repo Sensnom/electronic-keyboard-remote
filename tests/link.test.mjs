@@ -15,6 +15,30 @@ class Client extends EventEmitter {
  }
 }
 const config={url:'wss://broker.example/mqtt',upTopic:'piano/up',downTopic:'piano/down',qos:0,ackTimeoutMs:20};
+test('a stalled publish times out and releases the command queue', {timeout:1000},async()=>{
+ const client=new Client();client.publishAsync=()=>new Promise(()=>{});
+ const link=await connectInstrument({...config,ackTimeoutMs:5},async()=>client);
+ try{
+  await assert.rejects(link.status(),/超时/);
+  client.publishAsync=Client.prototype.publishAsync;
+  client.respond=p=>client.ack(p);
+  assert.equal((await link.status()).modules,1);
+ }finally{await link.close();}
+});
+test('disconnect rejects a command even when its publish callback never returns', {timeout:1000},async()=>{
+ const client=new Client();client.publishAsync=()=>new Promise(()=>{});
+ const link=await connectInstrument(config,async()=>client);
+ const pending=link.status();
+ await new Promise(resolve=>setImmediate(resolve));
+ await link.close();
+ await assert.rejects(pending,/断开|连接/);
+});
+test('a valid device ACK completes a request before a stalled publish callback', {timeout:1000},async()=>{
+ const client=new Client();
+ client.publishAsync=(_topic,bytes)=>{client.ack(bytes);return new Promise(()=>{});};
+ const link=await connectInstrument(config,async()=>client);
+ try{assert.equal((await link.status()).modules,1);}finally{await link.close();}
+});
 test('manual sustain uses a new capability and rejects the retired score parameter',async()=>{
  const client=new Client();let value=0;
  client.respond=p=>{if(p[2]===4)value=p[7]|p[8]<<8;client.ack(p,{actual:p[2]===5?0x89ff:value});};

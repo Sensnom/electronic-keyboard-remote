@@ -59,8 +59,12 @@ class InstrumentLink{
    answer.catch(()=>{});
    try{
     this.observe({kind:'tx',sequence:seq,requestType:type,data:bytes});
-    await this.client.publishAsync(this.downTopic,bytes,{qos:this.qos,retain:false});
-    const ack=await answer;
+    // An ACK or timeout must settle the request even if the MQTT publish
+    // callback stalls. A device ACK also proves that publication succeeded.
+    const ack=await Promise.race([
+     this.client.publishAsync(this.downTopic,bytes,{qos:this.qos,retain:false}).then(()=>answer),
+     answer,
+    ]);
     if(ack.code===5){this.sequence=ack.actual&255;continue;}
     if(ack.code===1)continue;
     this.sequence=(seq+1)&255;
